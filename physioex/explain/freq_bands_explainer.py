@@ -142,33 +142,6 @@ def compute_band_importance(bands : list[list[float]], band_names: List[str],  m
  
     return importances_df
 
-def get_band_importance(band : str, band_dict : dict, num_bands : int = 1, type : int = 0):
-    shape = 0
-    counter = 0
-    for key, value in band_dict.items():
-        if shape == 0:
-            importance = np.zeros(value.shape)
-            shape = 1
-        if band in key:
-            if type == 0:
-                importance += value
-            else: 
-                key_length = key.split(', ', -1)
-                importance += value * 1/(len(key_length))
-                
-            counter += 1
-
-    sum_weights = 0
-    for i in range(num_bands):
-        sum_weights += 1/(i+1)
-    
-    if type == 0 or type == 1:
-        importance = importance / counter
-    elif type == 2:
-        importance = importance / sum_weights
-
-    return importance
-
 class FreqBandsExplainer(PhysioExplainer):
     def __init__(self,
             model_name : str = "chambon2018", 
@@ -186,12 +159,64 @@ class FreqBandsExplainer(PhysioExplainer):
         self.sampling_rate = sampling_rate
         self.class_name = class_name
 
-    def print_combination(self, band_names : list):
-        combination = list(it.combinations(band_names))
-        print(combination)
+    def get_simple_importance(self, band_importance, permutations_array, band : int = 0):
+        importance = np.zeros(band_importance[0].shape)
+        counter = 0
 
-    def test_importance(self, importances_df : pd.DataFrame, band : int = 0):
-        pass
+        for i in range(len(permutations_array)):
+            if permutations_array[i][band] == 1:
+                importance += band_importance[i]
+                counter += 1
+
+        importance = importance / counter
+        return importance
+    
+    def get_weighted_importance(self, band_importance, permutations_array, band : int = 0):
+        importance = np.zeros(band_importance[0].shape)
+
+        for i in range(len(permutations_array)):
+            if permutations_array[i][band] == 1:
+                weight = 1/(np.sum(permutations_array[i] == 1))
+                importance += (band_importance[i] * weight)
+
+        return importance
+    
+    def get_normalized_importance(self, band_importance, permutations_array, band : int = 0):
+        importance = np.zeros(band_importance[0].shape)
+        weights_sum = 0
+
+        for i in range(len(permutations_array)):
+            if permutations_array[i][band] == 1:
+                weight = 1/(np.sum(permutations_array[i] == 1))
+                importance += (band_importance[i] * weight)
+                weights_sum += weight
+
+        importance = importance / weights_sum
+        return importance
+    
+    def get_geometric_importance(self, band_importance, permutations_array, band : int = 0):
+        importance = np.ones(band_importance[0].shape)
+        counter = 0
+
+        for i in range(len(permutations_array)):
+            if permutations_array[i][band] == 1:
+                importance *= band_importance[i]
+                counter += 1
+
+        importance = np.power(importance, 1/counter)
+        return importance
+    
+    def get_armonic_importance(self, band_importance, permutations_array, band : int = 0):
+        importance = np.zeros(band_importance[0].shape)
+        counter = 0
+
+        for i in range(len(permutations_array)):
+            if permutations_array[i][band] == 1:
+                importance += 1/band_importance[i]
+                counter += 1
+
+        importance = counter / importance
+        return importance
 
     def compute_band_importance(self, bands : list[list[float]], band_names : List[str], fold : int = 0, plot_pred : bool = False, plot_true : bool = False, save_csv : bool = False):
         logger.info("JOB:%d-Loading model %s from checkpoint %s" % (fold, str(self.model_call), self.checkpoints[fold]))
@@ -212,27 +237,46 @@ class FreqBandsExplainer(PhysioExplainer):
 
         self.module_config["loss_params"]["class_weights"] = datamodule.class_weights()
 
-        #la band_importance e' un dict che ha come chiavi le combinazioni delle bande, e come valori l'importanza per quella combinazione
-        band_importance = {}
-
         importances_df = compute_band_importance(bands, band_names, model, datamodule.train_dataloader(), model_device, self.sampling_rate, self.class_name)
 
         importances_df = pd.DataFrame(importances_df)
 
         if save_csv:   
-            importances_df.to_csv(self.ckpt_path + "band_combinations_importance_fold=" + str(fold) + ".csv", index=False)           
+            importances_df.to_csv(self.ckpt_path + "band_combinations_importance_fold=" + str(fold) + ".csv", index=False) 
+
+        band_importance = []
+
+        # Genera tutte le possibili permutazioni di 0 e 1 lungo 6
+        permutations = list(it.product([0, 1], repeat=6))
+        # Filtra le permutazioni escludendo quelle con tutti 0
+        filtered_permutations = [p for p in permutations if any(x == 1 for x in p)]
+        # Converte la lista di tuple in un array NumPy
+        permutations_array = np.array(filtered_permutations)
+
+        for i in range(len(permutations_array)):
+            colonne = permutations_array[i]
+            filtered_df = importances_df[importances_df.iloc[:, -6:].eq(colonne).all(axis=1)]
+            array_numpy = filtered_df.iloc[:, 1:6].values
+            band_importance.append(array_numpy)          
         
         simple_result = []
         weighted_result = []
         normalized_result = []
+        #geometric_result = []
+        #armonic_result = []
         for i, band in enumerate(band_names):
 
             #in base alla banda, ora dovro' prendermi l'importanza di quella banda per poterla plottare. per farlo, devo prendere, dal mio dizionario,
             #tutte le importanze in cui la mia banda compare, e poi farne la media
             #simple_importance = get_band_importance(str(band), band_importance, 6, 0)
-            simple_importance = test_importance(importances_df, i)
-            weighted_importance = get_band_importance(str(band), band_importance, 6, 1)
-            normalized_importance = get_band_importance(str(band), band_importance, 6, 2)
+            print(type(band_importance))
+            print(type(permutations_array))
+            simple_importance = self.get_simple_importance(band_importance, permutations_array, i)
+            weighted_importance = self.get_weighted_importance(band_importance, permutations_array, i)
+            normalized_importance = self.get_normalized_importance(band_importance, permutations_array, i)
+            #geometric_importance = self.get_geometric_importance(band_importance, permutations_array, i)
+            #armonic_importance = self.get_armonic_importance(band_importance, permutations_array, i)
+
 
             if plot_true:
                 ########## plot of simple importance ###########
